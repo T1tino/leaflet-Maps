@@ -64,12 +64,16 @@
             sections.note.style.display = 'block';
         }
 
-        // MAP
+// MAP
         if (s === 'map' && sections.map) {
             sections.map.style.display = 'block';
-            if (window.AppMap && typeof window.AppMap.invalidate === 'function') {
+            if (window.AppMap && typeof window.AppMap.invalidateSize === 'function') {
                 setTimeout(() => {
-                    try { window.AppMap.invalidate(); } catch (_) {}
+                    try { 
+                        window.AppMap.invalidateSize(); 
+                    } catch (e) {
+                        console.error("Error invalidating map size:", e);
+                    }
                 }, 150);
             }
         }
@@ -211,6 +215,15 @@ function updateProgress(percent, message) {
     if (statusText && message) statusText.innerText = message;
 }
 
+window.addEventListener('AppDataReady', () => {
+        const providerSection = document.getElementById('provider-directory-section');
+        if (providerSection && providerSection.style.display === 'block') {
+            console.log("🔄 [Provider] Datos listos detectados, actualizando vista de proveedores...");
+            if (typeof initMasterProviderDirectory === 'function') {
+                initMasterProviderDirectory();
+            }
+        }
+    });
 
 
     /* ======= Expose to window ======= */

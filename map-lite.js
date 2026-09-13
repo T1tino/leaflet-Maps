@@ -1,6 +1,10 @@
 /* ==========================================================
-   LOADING SCREEN & OPFS SYNC ENGINE (Strictly Orchestrated)
+   MAP LITE ENGINE (Strict Extract: OPFS Fetch ["load"] + Leaflet)
    ========================================================== */
+
+// Exponer utilidades de UI globalmente para evitar ReferenceErrors en el HTML
+window.closeSheet = window.LSEngine.closeSheet;
+window.renderClinicInfo = window.LSEngine.renderClinicInfo;
 
 window.LSEngine = window.LSEngine || {};
 
@@ -23,6 +27,80 @@ window.LSEngine.setProgress = function(percent, text, state) {
     if (stateText) stateText.textContent = state;
 };
 
+// --- CONFIG & OPFS PERSISTENCE UTILS ---
+window.LSEngine.getPowerAutomateUrl = function() {
+    try {
+        const params = new URLSearchParams(window.location.search);
+        const encoded = params.get("data");
+        return encoded ? atob(encoded) : null;
+    } catch (err) {
+        console.error("Invalid Power Automate URL", err);
+        return null;
+    }
+};
+
+window.LSEngine.writeDatasetToOPFS = async function(filename, contentString) {
+    const rootDir = await navigator.storage.getDirectory();
+    const dataDir = await rootDir.getDirectoryHandle("App_Data", { create: true });
+    const fileHandle = await dataDir.getFileHandle(filename, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(contentString);
+    await writable.close();
+};
+
+window.LSEngine.restoreCacheFromOPFSToLocalStorage = async function() {
+    try {
+        const rootDir = await navigator.storage.getDirectory();
+        const dataDir = await rootDir.getDirectoryHandle("App_Data");
+        const fileHandle = await dataDir.getFileHandle("cache_payload.json");
+        const file = await fileHandle.getFile();
+        const content = await file.text();
+
+        if (content) {
+            localStorage.setItem("cache_payload", content);
+            return true;
+        }
+    } catch (err) {
+        console.warn("⚠️ No OPFS cache found to restore:", err);
+    }
+    return false;
+};
+
+// --- CORE REQUEST (Strictly action: "load") ---
+window.LSEngine.taskFetchMainDataLite = async function(overrideUrl = null) {
+    let baseUrl = overrideUrl || window.LSEngine.getPowerAutomateUrl();
+    if (!baseUrl) throw new Error("No URL provided for main fetch.");
+    
+    const cacheBusterToken = `_cb=${Date.now()}`;
+    const separator = baseUrl.includes('?') ? '&' : '?';
+    const finalEndpointUrl = `${baseUrl}${separator}${cacheBusterToken}`;
+
+    window.LSEngine.setProgress(30, "Downloading system data...", "FETCHING");
+
+    const response = await fetch(finalEndpointUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({ action: "load" }) // Único request requerido con acción "load"
+    });
+
+    if (!response.ok) throw new Error(`Data fetch error (HTTP ${response.status})`);
+
+    const payload = await response.json();
+    const payloadString = JSON.stringify(payload);
+    
+    await window.LSEngine.writeDatasetToOPFS("cache_payload.json", payloadString);
+    await window.LSEngine.restoreCacheFromOPFSToLocalStorage();
+    
+    // Poblar catálogos globales de estado
+    window.LSEngine.state.globalClinics = payload.clinics || [];
+    window.LSEngine.state.globalExtensions = payload.extensions || [];
+    window.LSEngine.state.globalClinicLookup = payload.clinicLookup || [];
+
+    return payload;
+};
+
+// --- SHEET & UI RENDERING ---
 window.LSEngine.closeSheet = function() {
     const sheet = document.getElementById('place-sheet');
     if (sheet) sheet.classList.remove('open');
@@ -97,14 +175,10 @@ window.LSEngine.renderClinicInfo = function(clinic) {
             const sectionVal = findVal(['section', 'department', 'service', 'line', 'name']) || 'General';
 
             return `
-                <div style="background: #1e293b; padding: 10px 12px; border-radius: 6px; margin-bottom: 8px; border: 1px solid #334155;">
-                    <div style="font-weight: bold; color: #38bdf8; font-size: 13px; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
-                        <span>🔹</span> ${sectionVal}
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 12px; color: #cbd5e1;">
-                        <div><b>Phone:</b> <span style="color: #f8fafc;">${phoneVal}</span></div>
-                        <div><b>Ext:</b> <span style="color: #34d399; font-weight: bold;">${extVal}</span></div>
-                    </div>
+                <div style="background: #0f172a; padding: 10px; border-radius: 6px; margin-bottom: 8px; border: 1px solid #334155;">
+                    <div style="font-weight: bold; color: #38bdf8; font-size: 13px; margin-bottom: 4px;">🔹 ${sectionVal}</div>
+                    <div style="font-size: 12px; color: #cbd5e1; margin-bottom: 3px;"><b>Phone:</b> ${phoneVal}</div>
+                    <div style="font-size: 12px; color: #cbd5e1;"><b>Extension:</b> ${extVal}</div>
                 </div>
             `;
         }).join('');
@@ -123,7 +197,14 @@ window.LSEngine.renderClinicInfo = function(clinic) {
     }
 };
 
+// --- SAFE MAP INITIALIZER (Guarded against missing DOM / Leaflet) ---
 window.LSEngine.initializeMap = function() {
+    // Guardia estricta: Si Leaflet o el contenedor #map no existen, abortar para evitar ejecuciones prematuras
+    if (typeof L === 'undefined' || !document.getElementById('map')) {
+        console.warn("⚠️ Map initialization skipped: Leaflet library or #map container not available yet.");
+        return false;
+    }
+
     window.LSEngine.setProgress(90, "Rendering interactive map...", "RENDERING");
 
     const map = L.map('map', {
@@ -199,52 +280,6 @@ window.LSEngine.initializeMap = function() {
 
     map.addControl(new ClinicDropdownControl());
     setTimeout(() => map.invalidateSize(), 150);
-};
-
-// --- PASOS INDIVIDUALES PARA ORQUESTACIÓN DESDE EL HTML ---
-
-window.LSEngine.getEndpointUrl = function() {
-    const urlParams = new URLSearchParams(window.location.search);
-    const encodedData = urlParams.get('data');
-    if (!encodedData) throw new Error("Parameter 'data' was not found in the URL.");
-    return atob(encodedData);
-};
-
-window.LSEngine.stepConnect = async function(endpointUrl) {
-    window.LSEngine.setProgress(15, "Initializing connection...", "CONNECTING");
-    const response = await fetch(endpointUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "" })
-    });
-    if (!response.ok) throw new Error(`HTTP Error during connect: ${response.status}`);
-};
-
-window.LSEngine.stepRead = async function(endpointUrl) {
-    window.LSEngine.setProgress(40, "Reading server status...", "READ");
-    const response = await fetch(endpointUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "READ" })
-    });
-    if (!response.ok) throw new Error(`HTTP Error during read: ${response.status}`);
-};
-
-window.LSEngine.stepDownload = async function(endpointUrl) {
-    window.LSEngine.setProgress(70, "Downloading datasets...", "DOWNLOAD");
-    const response = await fetch(endpointUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "DOWNLOAD" })
-    });
-    if (!response.ok) throw new Error(`HTTP Error during download: ${response.status}`);
-    
-    const payloadData = await response.json();
-    localStorage.setItem("cache_payload", JSON.stringify(payloadData));
-    
-    window.LSEngine.state.globalClinics = payloadData.clinics || [];
-    window.LSEngine.state.globalExtensions = payloadData.extensions || [];
-    window.LSEngine.state.globalClinicLookup = payloadData.clinicLookup || [];
-    
-    return payloadData;
+    window.LSEngine.setProgress(100, "Ready", "READY");
+    return true;
 };

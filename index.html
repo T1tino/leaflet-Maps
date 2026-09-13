@@ -1,10 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
+    <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <script>
+        // Genera un token dinámico basado en la fecha/hora actual o versión del build
+        const appVersion = "1.0.2"; // Sube este número cada vez que hagas cambios importantes
+        
+        // Inyecta loading-screen.js evitando la caché del navegador
+        const script = document.createElement('script');
+        script.src = `loading-screen.js?v=${appVersion}`;
+        document.head.appendChild(script);
+    </script>
     <title>Clinic Note Builder & Locator</title>
-    <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><text y="12" font-size="12">🗂%EF%B8%8F</text></svg>' />
+    <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><text y="12" font-size="12">🗂️</text></svg>' />
     <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <link rel="stylesheet" href="app.css">
@@ -16,28 +25,40 @@
     <link rel="stylesheet" href="provider-directory.css">
     <link href="https://unpkg.com/tabulator-tables@5.5.2/dist/css/tabulator.min.css" rel="stylesheet">
     <script src="https://unpkg.com/tabulator-tables@5.5.2/dist/js/tabulator.min.js"></script>
-    
+
+    <script>
+        (function() {
+            try {
+                const lastTimestamp = parseInt(localStorage.getItem("app_last_sync_timestamp") || "0", 10);
+                const hasPayload = localStorage.getItem("cache_payload");
+                const ONE_HOUR_MS = 60 * 60 * 1000;
+                const isFresh = (Date.now() - lastTimestamp) < ONE_HOUR_MS;
+                const todayStr = new Date().toISOString().split("T")[0];
+                const lastSyncDate = localStorage.getItem("app_last_sync_date");
+
+                // Validamos si los datos NO son frescos, NO son de hoy, o falta el payload
+                const needsSync = !lastSyncDate || lastSyncDate !== todayStr || !isFresh || !hasPayload;
+
+                if (needsSync) {
+                    const currentPath = window.location.pathname;
+                    
+                    // Evitamos un bucle infinito si ya estamos en la pantalla de carga
+                    if (!currentPath.includes('loading-screen')) {
+                        window.location.replace('loading-screen.html' + window.location.search);
+                    }
+                } else {
+                    // Si todo está fresco, ocultamos el splash inmediatamente
+                    const style = document.createElement('style');
+                    style.innerHTML = '#sync-splash { display: none !important; opacity: 0 !important; pointer-events: none !important; }';
+                    document.head.appendChild(style);
+                }
+            } catch (e) {
+                console.error("Error en validación de sync:", e);
+            }
+        })();
+    </script>
 </head>
 <body>
-    <!-- loading screen -->
-    <div id="sync-splash" class="bt-splash">
-        <div class="bt-scanner-grid"></div>
-        <div class="bt-content">
-            <div class="bt-game-badge">DATA SYNC SYSTEM</div>
-            <h2 class="bt-title">CARGANDO RECURSOS</h2>
-            <p id="sync-status" class="bt-subtitle">Estableciendo enlace con SharePoint...</p>
-            
-            <div class="bt-progress-container">
-                <div id="bt-progress-bar" class="bt-progress-fill"></div>
-            </div>
-            
-            <div class="bt-hud-footer">
-                <span id="bt-percentage" class="bt-percent">0%</span>
-                <span class="bt-status-tag">ESTADO: <span id="bt-state-text">ESPERANDO</span></span>
-            </div>
-        </div>
-    </div>
-    <!-- rest of page -->
     <div class="app-container">
         <button class="burger" onclick="toggleMenu()"><span></span><span></span><span></span></button>
         <div class="sidebar-overlay" onclick="toggleMenu()"></div>
@@ -49,12 +70,11 @@
                 <div class="nav-item" onclick="navigateTo('directory')">Clinic Directory</div>
                 <div class="nav-item" onclick="navigateTo('provider-directory')">Provider Directory</div>
                 <div class="nav-item" onclick="navigateTo('info')">Guidelines & Info</div>
-                <div class="nav-item" onclick="navigateTo('admin')">Admin</div>
 
                 <div style="margin-top:auto;">
                     <hr style="opacity:0.2;">
-                    <div class="nav-item" onclick="cerrarServidor()" style="color:#ff6b6b;">
-                        🛑 Stop Server
+                    <div class="nav-item" onclick="window.triggerManualSync()" style="color:#4dabf7;" title="Force data update from cloud">
+                        🔄 Sync Data
                     </div>
                 </div>
             </nav>
@@ -187,65 +207,52 @@
                     
                 </div>
             </section>
-            
-            <section class="card" id="admin-section" style="display:none">
-                <div class="control-panel">
-                    <select id="selectorArchivos" onchange="cargarDesdeSelector()">
-                    </select>
-                    <button onclick="recargarArchivoActual()">🔄 Reload</button>
-                    <button onclick="agregarFila()">➕ Add Row</button>
-                    <button onclick="agregarColumna()">➕ Add Column</button>
-                    <button onclick="guardarCambios()">💾 Save</button>
-                </div>
-                <div id="admin-table"></div>
-            </section>
         </div>
     </div>
 
     <div class="toast" id="toast">✓ Copied to clipboard!</div>
 
-    <script>
-            window.APP_DATA = window.APP_DATA || {};
-            window.APP_FILES = window.APP_FILES || {};
+    <!-- Scripts principales y componentes de la aplicación -->
+    <script src="notes.js"></script>
+    <script src="admin.js"></script>
+    <script src="Guidelines_Info/Guidelines_Info.js"></script>
+    <script src="Guidelines_Info/Double_Booking_1-3.js"></script>
+    <script src="map.js"></script>
+    <script src="provider-directory.js"></script>
+    <script src="directory.js"></script>
 
-            window.registerDataFile = function(config, data) {
-                if (!window.APP_FILES[config.file]) {
-                    window.APP_FILES[config.file] = config;
-                }
-                window.APP_DATA[config.dataKey] = data;
-                console.log("📁 Registered:", config.file);
-            };
+    <script>
+        window.APP_DATA = window.APP_DATA || {};
+        window.APP_FILES = window.APP_FILES || {};
+
+        window.registerDataFile = function(config, data) {
+            if (!window.APP_FILES[config.file]) {
+                window.APP_FILES[config.file] = config;
+            }
+            window.APP_DATA[config.dataKey] = data;
+            console.log("📁 Registered:", config.file);
+        };
     </script>
     <script>
-    function openModal(id) {
-        var modal = document.getElementById(id);
-        var overlay = document.getElementById('overlay');
-        if (modal && overlay) {
-            modal.style.display = 'block';
-            overlay.style.display = 'block';
+        function openModal(id) {
+            var modal = document.getElementById(id);
+            var overlay = document.getElementById('overlay');
+            if (modal && overlay) {
+                modal.style.display = 'block';
+                overlay.style.display = 'block';
+            }
         }
-    }
 
-    function closeAll() {
-        var modals = document.getElementsByClassName('modal');
-        for (var i = 0; i < modals.length; i++) {
-            modals[i].style.display = 'none';
+        function closeAll() {
+            var modals = document.getElementsByClassName('modal');
+            for (var i = 0; i < modals.length; i++) {
+                modals[i].style.display = 'none';
+            }
+            var overlay = document.getElementById('overlay');
+            if (overlay) {
+                overlay.style.display = 'none';
+            }
         }
-        var overlay = document.getElementById('overlay');
-        if (overlay) {
-            overlay.style.display = 'none';
-        }
-    }
-</script>
-	<script src="data-loader.js"></script>
-    <script src="notes.js"></script>
-    <script src="map.js"></script>
-    <!-- <script src="directory.js"></script> -->
-    <script src="admin.js"></script> 
-    <script src="block-F12.js"></script>
-    <script src="Guidelines_Info/Guidelines_Info.js"></script>
-    <script src="Guidelines_Info/Dooble_Booking/Double_Booking_1-3.js"></script>
-    <script src="provider-directory.js"></script>
-    <script src="loading-screen.js"></script>
+    </script>
 </body>
 </html>
